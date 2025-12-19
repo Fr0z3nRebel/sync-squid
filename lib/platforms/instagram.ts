@@ -180,3 +180,70 @@ export async function uploadReelToInstagram(
   };
 }
 
+export interface InstagramUpdateMetadataOptions {
+  description: string;
+}
+
+/**
+ * Update metadata (description/caption) for an existing Instagram Reel
+ * Note: Instagram API has limited support for updating published content
+ * This function updates the caption if the media is still in draft state
+ */
+export async function updateInstagramReelMetadata(
+  userId: string,
+  mediaId: string,
+  options: InstagramUpdateMetadataOptions
+): Promise<void> {
+  const accessToken = await getValidInstagramAccessToken(userId);
+
+  // Get Facebook Page and Instagram Account
+  const pagesResponse = await fetch(
+    `https://graph.facebook.com/v18.0/me/accounts?access_token=${accessToken}`
+  );
+  
+  if (!pagesResponse.ok) {
+    throw new Error('Failed to get Facebook pages');
+  }
+
+  const pagesData = await pagesResponse.json();
+  if (!pagesData.data || pagesData.data.length === 0) {
+    throw new Error('No Facebook Page found');
+  }
+
+  const pageId = pagesData.data[0].id;
+  const pageInfoResponse = await fetch(
+    `https://graph.facebook.com/v18.0/${pageId}?fields=instagram_business_account&access_token=${accessToken}`
+  );
+
+  if (!pageInfoResponse.ok) {
+    throw new Error('Failed to get Instagram account from page');
+  }
+
+  const pageInfo = await pageInfoResponse.json();
+  const instagramAccountId = pageInfo.instagram_business_account?.id;
+
+  if (!instagramAccountId) {
+    throw new Error('No Instagram Business Account found');
+  }
+
+  // Update media caption
+  // Note: This only works for media that hasn't been published yet
+  const updateParams = new URLSearchParams({
+    access_token: accessToken,
+    caption: options.description,
+  });
+
+  const updateResponse = await fetch(
+    `https://graph.facebook.com/v18.0/${mediaId}?${updateParams.toString()}`,
+    {
+      method: 'POST',
+    }
+  );
+
+  if (!updateResponse.ok) {
+    const error = await updateResponse.text();
+    // Instagram may not allow updating published content
+    throw new Error(`Failed to update Instagram Reel metadata: ${error}. Note: Instagram may not allow updating published content.`);
+  }
+}
+

@@ -281,3 +281,26 @@ export async function uploadVideoToTikTok(
   };
 }
 
+export interface TikTokUpdateMetadataOptions {
+  title: string;
+  description: string;
+}
+
+/**
+ * Update metadata (title, description) for an existing TikTok video
+ * Note: TikTok API has limited support for updating published content
+ * This may only work for videos that haven't been published yet
+ */
+export async function updateTikTokVideoMetadata(
+  userId: string,
+  videoId: string,
+  options: TikTokUpdateMetadataOptions
+): Promise<void> {
+  const accessToken = await getValidTikTokAccessToken(userId);
+
+  // TikTok API v2 doesn't have a direct update endpoint for published videos
+  // The metadata is set during upload and cannot be changed after publishing
+  // This function is a placeholder for future API support
+  throw new Error('TikTok API does not currently support updating metadata for published videos. Metadata can only be set during upload.');
+}
+

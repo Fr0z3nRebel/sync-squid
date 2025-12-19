@@ -15,11 +15,15 @@ export type MetadataFormData = z.infer<typeof metadataSchema>;
 interface MetadataFormProps {
   onSubmit: (data: MetadataFormData) => void;
   defaultValues?: Partial<MetadataFormData>;
+  submitButtonText?: string;
+  showSubmitButton?: boolean;
 }
 
 export default function MetadataForm({
   onSubmit,
   defaultValues,
+  submitButtonText = 'Continue',
+  showSubmitButton = true,
 }: MetadataFormProps) {
   const {
     register,
@@ -112,12 +116,14 @@ export default function MetadataForm({
         )}
       </div>
 
-      <button
-        type="submit"
-        className="w-full rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
-      >
-        Continue
-      </button>
+      {showSubmitButton && (
+        <button
+          type="submit"
+          className="w-full rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
+        >
+          {submitButtonText}
+        </button>
+      )}
     </form>
   );
 }

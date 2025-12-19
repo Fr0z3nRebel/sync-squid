@@ -8,6 +8,7 @@ import { COMMON_TIMEZONES } from '@/lib/youtube-categories';
 import type { ScheduledPost, PostPlatform, Platform } from '@/types/database';
 import SchedulePicker from './SchedulePicker';
 import { useToast } from './ToastProvider';
+import MetadataForm, { type MetadataFormData } from './MetadataForm';
 
 interface PostWithPlatforms extends ScheduledPost {
   post_platforms: PostPlatform[];
@@ -33,9 +34,14 @@ export default function ScheduledPostsList() {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<string>('all');
   const [editingPostId, setEditingPostId] = useState<string | null>(null);
+  const [editingMetadataPostId, setEditingMetadataPostId] = useState<string | null>(null);
+  const [editingMetadataPost, setEditingMetadataPost] = useState<PostWithPlatforms | null>(null);
+  const [selectedPlatforms, setSelectedPlatforms] = useState<Platform[]>([]);
+  const [skipYouTubeTags, setSkipYouTubeTags] = useState(false);
   const [editSchedule, setEditSchedule] = useState<Date | null>(null);
   const [editTimezone, setEditTimezone] = useState<string>('UTC');
   const [saving, setSaving] = useState(false);
+  const [savingMetadata, setSavingMetadata] = useState(false);
   const [retryingPlatform, setRetryingPlatform] = useState<{ postId: string; platform: Platform } | null>(null);
   const [retryVideoFile, setRetryVideoFile] = useState<File | null>(null);
   const { showToast } = useToast();
@@ -107,6 +113,93 @@ export default function ScheduledPostsList() {
   const handleCancelEdit = () => {
     setEditingPostId(null);
     setEditSchedule(null);
+  };
+
+  const handleEditMetadata = (post: PostWithPlatforms) => {
+    setEditingMetadataPost(post);
+    setEditingMetadataPostId(post.id);
+    // Get all platforms where video is uploaded/published
+    const availablePlatforms = post.post_platforms
+      .filter((pp) => pp.platform_video_id && (pp.status === 'uploaded' || pp.status === 'published'))
+      .map((pp) => pp.platform);
+    // Default to all platforms selected
+    setSelectedPlatforms(availablePlatforms);
+    setSkipYouTubeTags(false); // Reset the skip tags option
+  };
+
+  const handleCancelEditMetadata = () => {
+    setEditingMetadataPostId(null);
+    setEditingMetadataPost(null);
+    setSelectedPlatforms([]);
+    setSkipYouTubeTags(false);
+  };
+
+  const handleTogglePlatform = (platform: Platform) => {
+    setSelectedPlatforms((prev) => {
+      if (prev.includes(platform)) {
+        return prev.filter((p) => p !== platform);
+      } else {
+        return [...prev, platform];
+      }
+    });
+  };
+
+  const handleSelectAllPlatforms = () => {
+    if (!editingMetadataPost) return;
+    const availablePlatforms = editingMetadataPost.post_platforms
+      .filter((pp) => pp.platform_video_id && (pp.status === 'uploaded' || pp.status === 'published'))
+      .map((pp) => pp.platform);
+    setSelectedPlatforms(availablePlatforms);
+  };
+
+  const handleDeselectAllPlatforms = () => {
+    setSelectedPlatforms([]);
+  };
+
+  const handleSaveMetadata = async (data: MetadataFormData) => {
+    if (!editingMetadataPostId) return;
+
+    setSavingMetadata(true);
+    try {
+      const response = await fetch(`/api/posts/${editingMetadataPostId}/metadata`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: data.title,
+          description: data.description,
+          tags: Array.isArray(data.tags) ? data.tags : (data.tags || '').split(',').map((t: string) => t.trim()).filter((t: string) => t.length > 0),
+          platforms: selectedPlatforms,
+          skipYouTubeTags,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to update metadata');
+      }
+
+      const result = await response.json();
+      
+      if (result.warning) {
+        showToast(
+          `${result.warning}. ${result.errors?.join(' ') || ''} Please reconnect your accounts if you see permission errors.`,
+          'error'
+        );
+      } else {
+        showToast('Metadata updated successfully', 'success');
+      }
+      
+      await loadPosts();
+      setEditingMetadataPostId(null);
+      setEditingMetadataPost(null);
+      setSelectedPlatforms([]);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Failed to update metadata';
+      showToast(errorMessage, 'error');
+      console.error('Error updating metadata:', error);
+    } finally {
+      setSavingMetadata(false);
+    }
   };
 
   const handleSaveSchedule = async () => {
@@ -384,13 +477,23 @@ export default function ScheduledPostsList() {
                     {post.tags && post.tags.length > 0 && (
                       <span>Tags: {post.tags.join(', ')}</span>
                     )}
-                    {(post.status === 'pending' || post.status === 'uploading') && (
-                      <button
-                        onClick={() => handleEditSchedule(post)}
-                        className="text-sm text-indigo-600 hover:text-indigo-700"
-                      >
-                        Edit Schedule
-                      </button>
+                    {post.status !== 'failed' && (
+                      <div className="flex gap-2">
+                        {(post.status === 'pending' || post.status === 'uploading') && (
+                          <button
+                            onClick={() => handleEditSchedule(post)}
+                            className="text-sm text-indigo-600 hover:text-indigo-700"
+                          >
+                            Edit Schedule
+                          </button>
+                        )}
+                        <button
+                          onClick={() => handleEditMetadata(post)}
+                          className="text-sm text-indigo-600 hover:text-indigo-700"
+                        >
+                          Edit Metadata
+                        </button>
+                      </div>
                     )}
                   </div>
 
@@ -428,6 +531,7 @@ export default function ScheduledPostsList() {
                       </div>
                     </div>
                   )}
+
 
                   {/* Platform Status */}
                   <div className="mt-4">
@@ -513,6 +617,132 @@ export default function ScheduledPostsList() {
           );
         })}
       </div>
+
+      {/* Edit Metadata Modal */}
+      {editingMetadataPostId && editingMetadataPost && (
+        <div 
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50"
+          onClick={handleCancelEditMetadata}
+        >
+          <div 
+            className="relative w-full max-w-2xl rounded-lg bg-white p-6 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="mb-4 text-xl font-semibold text-gray-900">
+              Edit Metadata
+            </h3>
+            
+            {/* Platform Selection */}
+            <div className="mb-6 rounded-lg border border-gray-200 bg-gray-50 p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <label className="text-sm font-medium text-gray-700">
+                  Update on Platforms:
+                </label>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={handleSelectAllPlatforms}
+                    className="text-xs text-indigo-600 hover:text-indigo-700"
+                  >
+                    Select All
+                  </button>
+                  <span className="text-gray-300">|</span>
+                  <button
+                    type="button"
+                    onClick={handleDeselectAllPlatforms}
+                    className="text-xs text-indigo-600 hover:text-indigo-700"
+                  >
+                    Deselect All
+                  </button>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-4">
+                {editingMetadataPost.post_platforms
+                  .filter((pp) => pp.platform_video_id && (pp.status === 'uploaded' || pp.status === 'published'))
+                  .map((pp) => (
+                    <label
+                      key={pp.id}
+                      className="flex cursor-pointer items-center gap-2"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedPlatforms.includes(pp.platform)}
+                        onChange={() => handleTogglePlatform(pp.platform)}
+                        className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <span className="text-sm text-gray-700">
+                        {PLATFORM_NAMES[pp.platform]}
+                      </span>
+                    </label>
+                  ))}
+              </div>
+              {selectedPlatforms.length === 0 && (
+                <p className="mt-2 text-xs text-amber-600">
+                  No platforms selected. Metadata will only be updated in the database.
+                </p>
+              )}
+            </div>
+
+            {/* YouTube Tag Skip Option */}
+            {selectedPlatforms.includes('youtube') && (
+              <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                <label className="flex cursor-pointer items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={skipYouTubeTags}
+                    onChange={(e) => setSkipYouTubeTags(e.target.checked)}
+                    className="h-4 w-4 rounded border-gray-300 text-amber-600 focus:ring-amber-500"
+                  />
+                  <span className="text-sm text-amber-800">
+                    <strong>Skip YouTube tags update</strong> - Only update title and description on YouTube (keeps existing tags)
+                  </span>
+                </label>
+                <p className="mt-1 ml-6 text-xs text-amber-600">
+                  Check this if you&apos;re getting tag errors. YouTube has strict tag formatting rules.
+                </p>
+              </div>
+            )}
+
+            <div id="metadata-form-container">
+              <MetadataForm
+                onSubmit={handleSaveMetadata}
+                defaultValues={{
+                  title: editingMetadataPost.title,
+                  description: editingMetadataPost.description,
+                  tags: Array.isArray(editingMetadataPost.tags) && editingMetadataPost.tags.length > 0 
+                    ? editingMetadataPost.tags.join(', ') 
+                    : '',
+                }}
+                submitButtonText={savingMetadata ? 'Saving...' : 'Save'}
+                showSubmitButton={false}
+              />
+            </div>
+            
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={handleCancelEditMetadata}
+                disabled={savingMetadata}
+                className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={(e) => {
+                  e.preventDefault();
+                  const form = document.getElementById('metadata-form-container')?.querySelector('form');
+                  if (form) {
+                    form.requestSubmit();
+                  }
+                }}
+                disabled={savingMetadata}
+                className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {savingMetadata ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

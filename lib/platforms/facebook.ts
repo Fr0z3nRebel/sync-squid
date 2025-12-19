@@ -462,3 +462,59 @@ function getOptimalChunkSize(fileSizeMB: number): number {
   return 2 * 1024 * 1024; // 2MB for small files
 }
 
+export interface FacebookUpdateMetadataOptions {
+  title: string;
+  description: string;
+}
+
+/**
+ * Update metadata (title, description) for an existing Facebook video
+ */
+export async function updateFacebookVideoMetadata(
+  userId: string,
+  videoId: string,
+  options: FacebookUpdateMetadataOptions
+): Promise<void> {
+  const accessToken = await getValidFacebookAccessToken(userId);
+
+  // Get page access token (videos are posted to pages)
+  const pagesResponse = await fetch(
+    `https://graph.facebook.com/v18.0/me/accounts?access_token=${accessToken}`
+  );
+  
+  if (!pagesResponse.ok) {
+    throw new Error('Failed to get Facebook pages');
+  }
+
+  const pagesData = await pagesResponse.json();
+  if (!pagesData.data || pagesData.data.length === 0) {
+    throw new Error('No Facebook Page found');
+  }
+
+  const pageId = pagesData.data[0].id;
+  const pageTokenResponse = await fetch(
+    `https://graph.facebook.com/v18.0/${pageId}?fields=access_token&access_token=${accessToken}`
+  );
+  const pageData = await pageTokenResponse.json();
+  const pageAccessToken = pageData.access_token;
+
+  // Update video metadata using Graph API
+  const updateParams = new URLSearchParams({
+    access_token: pageAccessToken,
+    title: options.title,
+    description: options.description,
+  });
+
+  const updateResponse = await fetch(
+    `https://graph.facebook.com/v18.0/${videoId}?${updateParams.toString()}`,
+    {
+      method: 'POST',
+    }
+  );
+
+  if (!updateResponse.ok) {
+    const error = await updateResponse.text();
+    throw new Error(`Failed to update Facebook video metadata: ${error}`);
+  }
+}
+

@@ -187,12 +187,15 @@ export async function uploadVideoToYouTube(
 ): Promise<YouTubeUploadResult> {
   const accessToken = await getValidYouTubeAccessToken(userId);
 
+  // Validate and filter tags
+  const validTags = validateYouTubeTags(options.tags);
+
   // Step 1: Initialize upload and get upload URL
   const metadata = {
     snippet: {
       title: options.title,
       description: options.description,
-      tags: options.tags || [],
+      tags: validTags,
       categoryId: options.categoryId || '22', // Default to People & Blogs if not specified
     },
     status: {
@@ -344,6 +347,213 @@ export async function updateYouTubeVideoSchedule(
   if (!updateResponse.ok) {
     const error = await updateResponse.text();
     throw new Error(`Failed to update YouTube video schedule: ${error}`);
+  }
+}
+
+export interface YouTubeUpdateMetadataOptions {
+  title: string;
+  description: string;
+  tags?: string[];
+  categoryId?: string;
+  skipTags?: boolean; // Skip updating tags entirely (keeps existing YouTube tags)
+}
+
+/**
+ * Validate and filter tags for YouTube API requirements:
+ * - Each tag max 30 characters
+ * - Total combined length of all tags max 500 characters
+ *   - Tags with spaces are wrapped in quotes, adding 2 characters
+ *   - Commas between tags also count (1 character per tag after the first)
+ * - Remove empty tags and trim whitespace
+ * - Remove invalid characters (no apostrophes, question marks, exclamation marks, or punctuation)
+ * - Tags must be alphanumeric with limited special characters (spaces, hyphens, underscores)
+ * - Remove duplicate tags (case-insensitive)
+ */
+function validateYouTubeTags(tags: string[] | undefined): string[] {
+  if (!tags || tags.length === 0) {
+    return [];
+  }
+
+  // Filter and validate tags
+  const validTags: string[] = [];
+  let totalLength = 0;
+  const maxTagLength = 30;
+  const maxTotalLength = 500;
+  
+  // YouTube allows: letters, numbers, spaces, hyphens, underscores ONLY
+  // NO apostrophes, question marks, exclamation marks, or any other punctuation
+  // Be very restrictive - YouTube is extremely strict about tag format
+  const sanitizeTag = (tag: string): string => {
+    if (!tag || typeof tag !== 'string') {
+      return '';
+    }
+    
+    // Remove ALL punctuation including apostrophes, question marks, exclamation marks, etc.
+    // Keep only alphanumeric, spaces, hyphens, and underscores
+    // The regex [^\w\s\-] removes everything except word characters, spaces, and hyphens
+    // This explicitly removes: apostrophes ('), question marks (?), exclamation marks (!), etc.
+    let sanitized = tag
+      .replace(/[''""?!.,;:()\[\]{}@#$%^&*+=|\\\/<>~`]/g, '') // Explicitly remove common punctuation
+      .replace(/[^\w\s\-]/g, '') // Remove any remaining invalid characters (keep only word chars, spaces, hyphens)
+      .replace(/\s+/g, ' ') // Normalize multiple spaces to single space
+      .trim();
+    
+    // Remove tags that are only special characters or too short (less than 1 character after sanitization)
+    if (sanitized.length < 1) {
+      return '';
+    }
+    
+    // Remove leading/trailing hyphens that might cause issues
+    sanitized = sanitized.replace(/^\-+|\-+$/g, '');
+    
+    // Final check - if tag is empty after all processing, return empty string
+    if (sanitized.length < 1) {
+      return '';
+    }
+    
+    // Ensure tag doesn't contain only spaces
+    if (!sanitized.replace(/\s/g, '').length) {
+      return '';
+    }
+    
+    return sanitized;
+  };
+
+  // Use a Set to track tags we've already added (case-insensitive for duplicate detection)
+  const seenTags = new Set<string>();
+
+  for (const tag of tags) {
+    // Trim and filter empty tags
+    let processedTag = tag.trim();
+    if (!processedTag) continue;
+
+    // Sanitize the tag
+    processedTag = sanitizeTag(processedTag);
+    if (!processedTag) continue;
+
+    // Check individual tag length
+    if (processedTag.length > maxTagLength) {
+      // Truncate to max length
+      processedTag = processedTag.substring(0, maxTagLength).trim();
+      if (!processedTag) continue;
+    }
+
+    // Check for duplicates (case-insensitive)
+    const tagLower = processedTag.toLowerCase();
+    if (seenTags.has(tagLower)) {
+      // Skip duplicate tags
+      continue;
+    }
+
+    // Calculate the length YouTube will count for this tag
+    // Tags with spaces are wrapped in quotes, adding 2 characters
+    // Also add 1 for the comma separator (except for the first tag)
+    const hasSpaces = processedTag.includes(' ');
+    const tagCharLength = hasSpaces ? processedTag.length + 2 : processedTag.length;
+    const commaLength = validTags.length > 0 ? 1 : 0; // comma before this tag (if not first)
+    const youtubeTagLength = tagCharLength + commaLength;
+
+    // Check if adding this tag would exceed total length
+    // YouTube's 500 character limit includes quotes for tags with spaces AND commas between tags
+    if (totalLength + youtubeTagLength > maxTotalLength) {
+      // Stop adding tags if we'd exceed the limit
+      break;
+    }
+
+    validTags.push(processedTag);
+    seenTags.add(tagLower);
+    totalLength += youtubeTagLength;
+  }
+
+  return validTags;
+}
+
+/**
+ * Update metadata (title, description, tags) for an existing YouTube video
+ */
+export async function updateYouTubeVideoMetadata(
+  userId: string,
+  videoId: string,
+  options: YouTubeUpdateMetadataOptions
+): Promise<void> {
+  const accessToken = await getValidYouTubeAccessToken(userId);
+
+  // Get current video details first
+  const getResponse = await fetch(
+    `https://www.googleapis.com/youtube/v3/videos?part=snippet&id=${videoId}`,
+    {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
+
+  if (!getResponse.ok) {
+    const error = await getResponse.text();
+    throw new Error(`Failed to get video details: ${error}`);
+  }
+
+  const videoData = await getResponse.json();
+  if (!videoData.items || videoData.items.length === 0) {
+    throw new Error('Video not found');
+  }
+
+  const video = videoData.items[0];
+
+  // Build snippet object with ONLY writable fields
+  // YouTube API rejects updates that include read-only fields like:
+  // publishedAt, channelId, thumbnails, liveBroadcastContent, localized
+  const snippetUpdate: any = {
+    title: options.title,
+    description: options.description,
+    categoryId: options.categoryId || video.snippet.categoryId || '22',
+  };
+
+  // Include defaultLanguage if it exists (optional writable field)
+  if (video.snippet.defaultLanguage) {
+    snippetUpdate.defaultLanguage = video.snippet.defaultLanguage;
+  }
+
+  // Only update tags if they are provided and not skipped
+  // skipTags option allows updating only title/description without touching tags
+  if (options.skipTags) {
+    // Don't include tags field at all - YouTube will keep existing tags
+    console.log('YouTube: Skipping tag update, keeping existing tags');
+  } else if (options.tags !== undefined && options.tags !== null) {
+    const validTags = validateYouTubeTags(options.tags);
+    
+    // Log for debugging
+    console.log('YouTube tags validation:', {
+      input: options.tags,
+      output: validTags,
+      totalLength: validTags.reduce((sum, tag) => sum + (tag.includes(' ') ? tag.length + 2 : tag.length), 0),
+    });
+    
+    // Set tags - use validated array (can be empty)
+    snippetUpdate.tags = validTags;
+  }
+  // If tags not provided and not skipping, don't include tags field - YouTube keeps existing
+
+  // Update the video metadata
+  const updateResponse = await fetch(
+    'https://www.googleapis.com/youtube/v3/videos?part=snippet',
+    {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        id: videoId,
+        snippet: snippetUpdate,
+      }),
+    }
+  );
+
+  if (!updateResponse.ok) {
+    const error = await updateResponse.text();
+    throw new Error(`Failed to update YouTube video metadata: ${error}`);
   }
 }
 
