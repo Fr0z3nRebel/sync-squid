@@ -9,7 +9,7 @@ export function getFacebookAuthUrl(state?: string): string {
   const params = new URLSearchParams({
     client_id: FACEBOOK_APP_ID,
     redirect_uri: REDIRECT_URI,
-    scope: 'pages_manage_posts,pages_read_engagement,instagram_basic,instagram_content_publish',
+    scope: 'pages_show_list,pages_manage_posts,pages_read_engagement,instagram_basic,instagram_content_publish',
     response_type: 'code',
     ...(state && { state }),
   });
@@ -157,6 +157,7 @@ export interface FacebookUploadOptions {
   description: string;
   scheduledAt: Date;
   pageId?: string; // Facebook Page ID for posting
+  videoType?: 'REELS' | 'VIDEO'; // Post as Reels or regular video (default: VIDEO)
 }
 
 export interface FacebookUploadResult {
@@ -200,6 +201,19 @@ export async function uploadVideoToFacebook(
     ? await options.videoFile.arrayBuffer()
     : options.videoFile;
 
+  const requestBody: Record<string, any> = {
+    access_token: pageAccessToken,
+    title: options.title,
+    description: options.description,
+    scheduled_publish_time: Math.floor(options.scheduledAt.getTime() / 1000),
+    published: false,
+  };
+
+  // Only add video_type parameter if explicitly set to REELS
+  if (options.videoType === 'REELS') {
+    requestBody.video_type = 'REELS';
+  }
+
   const createVideoResponse = await fetch(
     `https://graph.facebook.com/v18.0/${pageId}/videos`,
     {
@@ -207,13 +221,7 @@ export async function uploadVideoToFacebook(
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        access_token: pageAccessToken,
-        title: options.title,
-        description: options.description,
-        scheduled_publish_time: Math.floor(options.scheduledAt.getTime() / 1000),
-        published: false,
-      }),
+      body: JSON.stringify(requestBody),
     }
   );
 

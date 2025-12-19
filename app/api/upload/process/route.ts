@@ -30,6 +30,7 @@ export async function POST(request: NextRequest) {
       tags,
       scheduledAt,
       youtubeCategoryId,
+      facebookVideoType,
     } = body;
 
     if (!postId || !filePath || !platform || !title || !description || !scheduledAt) {
@@ -79,6 +80,7 @@ export async function POST(request: NextRequest) {
             title,
             description,
             scheduledAt: scheduledDate,
+            videoType: facebookVideoType === 'REELS' ? 'REELS' : undefined,
           });
           break;
 

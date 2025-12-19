@@ -22,6 +22,7 @@ export default function UploadPage() {
   const [scheduledDate, setScheduledDate] = useState<Date | null>(null);
   const [scheduledTimezone, setScheduledTimezone] = useState<string>('UTC');
   const [youtubeCategoryId, setYoutubeCategoryId] = useState<string | null>(null);
+  const [facebookVideoType, setFacebookVideoType] = useState<'REELS' | 'VIDEO'>('VIDEO');
   const [selectedPlatforms, setSelectedPlatforms] = useState<Platform[]>([]);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -137,6 +138,7 @@ export default function UploadPage() {
             tags: Array.isArray(metadata.tags) ? metadata.tags : (metadata.tags || '').split(',').map((t: string) => t.trim()),
             scheduledAt: scheduledDate.toISOString(),
             youtubeCategoryId: youtubeCategoryId,
+            facebookVideoType: platform === 'facebook' ? facebookVideoType : undefined,
           }),
         });
 
@@ -346,6 +348,28 @@ export default function UploadPage() {
                 selectedPlatforms={selectedPlatforms}
                 onPlatformsChange={setSelectedPlatforms}
               />
+              
+              {selectedPlatforms.includes('facebook') && (
+                <div className="mt-6 rounded-lg border border-gray-200 bg-gray-50 p-4">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Facebook Video Type
+                  </label>
+                  <select
+                    value={facebookVideoType}
+                    onChange={(e) => setFacebookVideoType(e.target.value as 'REELS' | 'VIDEO')}
+                    className="block w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-indigo-500"
+                  >
+                    <option value="VIDEO">Regular Video</option>
+                    <option value="REELS">Reels</option>
+                  </select>
+                  <p className="mt-2 text-xs text-gray-500">
+                    {facebookVideoType === 'REELS' 
+                      ? 'Video will be posted as a Reel (requires 9:16 aspect ratio, 3-90 seconds)'
+                      : 'Video will be posted as a regular video on your Page'}
+                  </p>
+                </div>
+              )}
+              
               <div className="mt-6 flex gap-4">
                 <button
                   onClick={() => setStep('schedule')}
