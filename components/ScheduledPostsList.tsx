@@ -36,6 +36,8 @@ export default function ScheduledPostsList() {
   const [editSchedule, setEditSchedule] = useState<Date | null>(null);
   const [editTimezone, setEditTimezone] = useState<string>('UTC');
   const [saving, setSaving] = useState(false);
+  const [retryingPlatform, setRetryingPlatform] = useState<{ postId: string; platform: Platform } | null>(null);
+  const [retryVideoFile, setRetryVideoFile] = useState<File | null>(null);
   const { showToast } = useToast();
   const supabase = createClient();
 
@@ -154,6 +156,93 @@ export default function ScheduledPostsList() {
       console.error('Error updating schedule:', error);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleRetry = async (postId: string, platform: Platform) => {
+    // If we're already in retry mode and have a file, upload it first
+    if (retryVideoFile && retryingPlatform?.postId === postId && retryingPlatform?.platform === platform) {
+      // User provided a new video file, upload it to Supabase Storage first
+      try {
+        const formData = new FormData();
+        formData.append('video', retryVideoFile);
+        formData.append('postId', postId);
+
+        const storageResponse = await fetch('/api/upload/storage', {
+          method: 'POST',
+          body: formData,
+        });
+
+        if (!storageResponse.ok) {
+          const errorData = await storageResponse.json();
+          throw new Error(errorData.error || 'Failed to upload video to storage');
+        }
+
+        const storageData = await storageResponse.json();
+        const filePath = storageData.filePath;
+
+        // Now retry with the new file path
+        const response = await fetch('/api/upload/retry', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            postId,
+            platform,
+            filePath,
+          }),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || 'Failed to retry upload');
+        }
+
+        showToast(`Successfully retried upload to ${PLATFORM_NAMES[platform]}`, 'success');
+        await loadPosts();
+        setRetryingPlatform(null);
+        setRetryVideoFile(null);
+        return;
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Failed to retry upload';
+        showToast(errorMessage, 'error');
+        console.error('Error retrying upload:', error);
+        return;
+      }
+    }
+
+    // First attempt: try without a file (use existing file in storage)
+    try {
+      const response = await fetch('/api/upload/retry', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          postId,
+          platform,
+          // Don't pass filePath - let API use existing file
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        if (data.requiresVideo) {
+          // Video not found - show file input
+          setRetryingPlatform({ postId, platform });
+          showToast('Video file not found in storage. Please select a video file to retry.', 'error');
+          return;
+        }
+        throw new Error(data.error || 'Failed to retry upload');
+      }
+
+      showToast(`Successfully retried upload to ${PLATFORM_NAMES[platform]}`, 'success');
+      await loadPosts();
+      setRetryingPlatform(null);
+      setRetryVideoFile(null);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Failed to retry upload';
+      showToast(errorMessage, 'error');
+      console.error('Error retrying upload:', error);
     }
   };
 
@@ -346,28 +435,76 @@ export default function ScheduledPostsList() {
                       Platform Status:
                     </p>
                     <div className="flex flex-wrap gap-2">
-                      {post.post_platforms.map((pp) => (
-                        <div
-                          key={pp.id}
-                          className="flex items-center gap-2 rounded-md border border-gray-200 px-2 py-1"
-                        >
-                          <span className="text-sm font-medium text-gray-700">
-                            {PLATFORM_NAMES[pp.platform]}
-                          </span>
-                          <span
-                            className={`rounded-full px-2 py-0.5 text-xs font-medium ${
-                              STATUS_COLORS[pp.status] || STATUS_COLORS.pending
-                            }`}
+                      {post.post_platforms.map((pp) => {
+                        const isRetrying = retryingPlatform?.postId === post.id && retryingPlatform?.platform === pp.platform;
+                        const showRetry = pp.status === 'failed';
+                        
+                        return (
+                          <div
+                            key={pp.id}
+                            className="flex items-center gap-2 rounded-md border border-gray-200 px-2 py-1"
                           >
-                            {pp.status}
-                          </span>
-                          {pp.error_message && (
-                            <span className="text-xs text-red-600">
-                              {pp.error_message}
+                            <span className="text-sm font-medium text-gray-700">
+                              {PLATFORM_NAMES[pp.platform]}
                             </span>
-                          )}
-                        </div>
-                      ))}
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                                STATUS_COLORS[pp.status] || STATUS_COLORS.pending
+                              }`}
+                            >
+                              {pp.status}
+                            </span>
+                            {pp.error_message && (
+                              <span className="text-xs text-red-600 max-w-xs truncate" title={pp.error_message}>
+                                {pp.error_message}
+                              </span>
+                            )}
+                            {showRetry && (
+                              <div className="flex items-center gap-2">
+                                {isRetrying && (
+                                  <>
+                                    <input
+                                      type="file"
+                                      accept="video/*"
+                                      onChange={(e) => {
+                                        const file = e.target.files?.[0];
+                                        if (file) {
+                                          setRetryVideoFile(file);
+                                        }
+                                      }}
+                                      className="text-xs"
+                                    />
+                                    <button
+                                      onClick={() => handleRetry(post.id, pp.platform)}
+                                      disabled={!retryVideoFile}
+                                      className="rounded-md bg-indigo-600 px-2 py-1 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                      Retry with New Video
+                                    </button>
+                                    <button
+                                      onClick={() => {
+                                        setRetryingPlatform(null);
+                                        setRetryVideoFile(null);
+                                      }}
+                                      className="rounded-md border border-gray-300 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                                    >
+                                      Cancel
+                                    </button>
+                                  </>
+                                )}
+                                {!isRetrying && (
+                                  <button
+                                    onClick={() => handleRetry(post.id, pp.platform)}
+                                    className="rounded-md bg-indigo-600 px-2 py-1 text-xs font-medium text-white hover:bg-indigo-700"
+                                  >
+                                    Retry
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 </div>

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { formatInTimeZone } from 'date-fns-tz';
 import VideoUploader from '@/components/VideoUploader';
@@ -23,6 +23,10 @@ export default function UploadPage() {
   const [scheduledTimezone, setScheduledTimezone] = useState<string>('UTC');
   const [youtubeCategoryId, setYoutubeCategoryId] = useState<string | null>(null);
   const [facebookVideoType, setFacebookVideoType] = useState<'REELS' | 'VIDEO'>('VIDEO');
+  const [facebookPages, setFacebookPages] = useState<Array<{ id: string; name: string; category?: string; picture?: { data: { url: string } } }>>([]);
+  const [selectedFacebookPageId, setSelectedFacebookPageId] = useState<string | null>(null);
+  const [loadingFacebookPages, setLoadingFacebookPages] = useState(false);
+  const [facebookPagesError, setFacebookPagesError] = useState<string | null>(null);
   const [selectedPlatforms, setSelectedPlatforms] = useState<Platform[]>([]);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -49,9 +53,62 @@ export default function UploadPage() {
     // Don't auto-advance - wait for Continue button
   };
 
+  // Fetch Facebook pages when Facebook is selected
+  useEffect(() => {
+    const fetchFacebookPages = async () => {
+      if (selectedPlatforms.includes('facebook') && !loadingFacebookPages) {
+        setLoadingFacebookPages(true);
+        setFacebookPagesError(null);
+        try {
+          const response = await fetch('/api/platforms/facebook/pages');
+          if (response.ok) {
+            const data = await response.json();
+            const pages = data.pages || [];
+            console.log(`Received ${pages.length} pages from API. Total: ${data.total}`);
+            console.log('Pages:', pages.map((p: any) => ({ id: p.id, name: p.name })));
+            setFacebookPages(pages);
+            // Auto-select first page if available and none selected
+            if (pages.length > 0 && !selectedFacebookPageId) {
+              setSelectedFacebookPageId(pages[0].id);
+            } else if (pages.length === 0) {
+              setFacebookPagesError('No Facebook pages found. Please ensure you have at least one page and have granted the "pages_show_list" permission during authentication.');
+            }
+          } else {
+            const errorData = await response.json().catch(() => ({}));
+            const errorMessage = errorData.error || `Failed to fetch Facebook pages (${response.status})`;
+            console.error('Failed to fetch Facebook pages:', response.status, errorData);
+            setFacebookPagesError(errorMessage);
+            setFacebookPages([]);
+          }
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : 'Failed to fetch Facebook pages';
+          console.error('Error fetching Facebook pages:', error);
+          setFacebookPagesError(errorMessage);
+          setFacebookPages([]);
+        } finally {
+          setLoadingFacebookPages(false);
+        }
+      } else if (!selectedPlatforms.includes('facebook')) {
+        // Clear pages when Facebook is deselected
+        setFacebookPages([]);
+        setSelectedFacebookPageId(null);
+        setFacebookPagesError(null);
+      }
+    };
+
+    fetchFacebookPages();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPlatforms]);
+
   const handleSubmit = async () => {
     if (!videoFile || !metadata || !scheduledDate || selectedPlatforms.length === 0) {
       setError('Please complete all steps');
+      return;
+    }
+
+    // Validate Facebook page selection
+    if (selectedPlatforms.includes('facebook') && !selectedFacebookPageId) {
+      setError('Please select a Facebook page to post to');
       return;
     }
 
@@ -122,7 +179,16 @@ export default function UploadPage() {
         throw new Error(`Failed to upload to storage: ${uploadError.message}`);
       }
 
-      // Step 3: Process uploads to each platform from storage
+      // Step 3: Store the file path in the database for potential retry
+      if (postId && filePath) {
+        const supabase = createClient();
+        await supabase
+          .from('scheduled_posts')
+          .update({ video_file_path: filePath })
+          .eq('id', postId);
+      }
+
+      // Step 4: Process uploads to each platform from storage
       const uploadPromises = selectedPlatforms.map(async (platform: Platform) => {
         const processResponse = await fetch('/api/upload/process', {
           method: 'POST',
@@ -139,6 +205,7 @@ export default function UploadPage() {
             scheduledAt: scheduledDate.toISOString(),
             youtubeCategoryId: youtubeCategoryId,
             facebookVideoType: platform === 'facebook' ? facebookVideoType : undefined,
+            facebookPageId: platform === 'facebook' ? selectedFacebookPageId : undefined,
           }),
         });
 
@@ -153,22 +220,35 @@ export default function UploadPage() {
       // Wait for all uploads to complete
       const results = await Promise.allSettled(uploadPromises);
       
-      // Delete video from Supabase Storage after all platforms are processed
-      try {
-        await fetch('/api/upload/delete-storage', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ filePath }),
-        });
-      } catch (deleteErr) {
-        console.error('Error deleting video from storage:', deleteErr);
-        // Don't fail the request if deletion fails - cleanup job will handle it
-      }
-      
       // Check if any failed
       const failures = results.filter(r => r.status === 'rejected');
+      const successes = results.filter(r => r.status === 'fulfilled');
+      
+      // Only delete video from storage if ALL platforms succeeded
+      if (failures.length === 0 && successes.length === selectedPlatforms.length) {
+        try {
+          await fetch('/api/upload/delete-storage', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ filePath }),
+          });
+          
+          // Clear the file path from database since video is deleted
+          if (postId) {
+            const supabase = createClient();
+            await supabase
+              .from('scheduled_posts')
+              .update({ video_file_path: null })
+              .eq('id', postId);
+          }
+        } catch (deleteErr) {
+          console.error('Error deleting video from storage:', deleteErr);
+          // Don't fail the request if deletion fails - cleanup job will handle it
+        }
+      }
+      
       if (failures.length > 0) {
         const errorMessages = failures.map(f => 
           f.status === 'rejected' ? f.reason?.message || 'Unknown error' : ''
@@ -194,19 +274,16 @@ export default function UploadPage() {
       setError(errorMessage);
       showToast(errorMessage, 'error');
       
-      // Try to clean up the video from storage if it was uploaded
-      if (filePath) {
-        try {
-          await fetch('/api/upload/delete-storage', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ filePath }),
-          });
-        } catch (cleanupErr) {
-          console.error('Error cleaning up video:', cleanupErr);
-        }
+      // Don't delete video from storage if upload failed - keep it for retry
+      // The video_file_path is already stored in the database
+      
+      // Update post status to failed if we have a postId
+      if (postId) {
+        const supabase = createClient();
+        await supabase
+          .from('scheduled_posts')
+          .update({ status: 'failed' })
+          .eq('id', postId);
       }
       
       setUploading(false);
@@ -350,24 +427,80 @@ export default function UploadPage() {
               />
               
               {selectedPlatforms.includes('facebook') && (
-                <div className="mt-6 rounded-lg border border-gray-200 bg-gray-50 p-4">
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Facebook Video Type
-                  </label>
-                  <select
-                    value={facebookVideoType}
-                    onChange={(e) => setFacebookVideoType(e.target.value as 'REELS' | 'VIDEO')}
-                    className="block w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-indigo-500"
-                  >
-                    <option value="VIDEO">Regular Video</option>
-                    <option value="REELS">Reels</option>
-                  </select>
-                  <p className="mt-2 text-xs text-gray-500">
-                    {facebookVideoType === 'REELS' 
-                      ? 'Video will be posted as a Reel (requires 9:16 aspect ratio, 3-90 seconds)'
-                      : 'Video will be posted as a regular video on your Page'}
-                  </p>
-                </div>
+                <>
+                  <div className="mt-6 rounded-lg border border-gray-200 bg-gray-50 p-4">
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Facebook Page <span className="text-red-500">*</span>
+                    </label>
+                    {loadingFacebookPages ? (
+                      <p className="text-sm text-gray-600">Loading pages...</p>
+                    ) : facebookPagesError ? (
+                      <div className="rounded-md bg-red-50 p-3">
+                        <p className="text-sm text-red-800 font-medium">Error loading pages</p>
+                        <p className="text-sm text-red-700 mt-1">{facebookPagesError}</p>
+                        <p className="text-xs text-red-600 mt-2">
+                          Try disconnecting and reconnecting your Facebook account, and make sure to select all pages you want to use.
+                        </p>
+                      </div>
+                    ) : facebookPages.length > 0 ? (
+                      <select
+                        value={selectedFacebookPageId || ''}
+                        onChange={(e) => setSelectedFacebookPageId(e.target.value)}
+                        className="block w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-indigo-500"
+                        required
+                      >
+                        <option value="">Select a page...</option>
+                        {facebookPages.map((page) => (
+                          <option key={page.id} value={page.id}>
+                            {page.name} {page.category ? `(${page.category})` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <div className="rounded-md bg-amber-50 p-3">
+                        <p className="text-sm text-amber-800 font-medium">No Facebook pages found</p>
+                        <p className="text-sm text-amber-700 mt-1">
+                          Please ensure you have at least one page and have granted the "pages_show_list" permission during authentication.
+                        </p>
+                      </div>
+                    )}
+                    <button
+                      onClick={() => {
+                        setFacebookPages([]);
+                        setLoadingFacebookPages(false);
+                        setSelectedFacebookPageId(null);
+                        setFacebookPagesError(null);
+                      }}
+                      className="mt-2 text-sm text-indigo-600 hover:text-indigo-700"
+                    >
+                      Refresh Pages
+                    </button>
+                    {facebookPages.length > 0 && (
+                      <p className="mt-2 text-xs text-gray-500">
+                        Total pages found: {facebookPages.length}
+                      </p>
+                    )}
+                  </div>
+                  
+                  <div className="mt-6 rounded-lg border border-gray-200 bg-gray-50 p-4">
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Facebook Video Type
+                    </label>
+                    <select
+                      value={facebookVideoType}
+                      onChange={(e) => setFacebookVideoType(e.target.value as 'REELS' | 'VIDEO')}
+                      className="block w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-indigo-500"
+                    >
+                      <option value="VIDEO">Regular Video</option>
+                      <option value="REELS">Reels</option>
+                    </select>
+                    <p className="mt-2 text-xs text-gray-500">
+                      {facebookVideoType === 'REELS' 
+                        ? 'Video will be posted as a Reel (requires 9:16 aspect ratio, 3-90 seconds)'
+                        : 'Video will be posted as a regular video on your Page'}
+                    </p>
+                  </div>
+                </>
               )}
               
               <div className="mt-6 flex gap-4">
@@ -379,7 +512,7 @@ export default function UploadPage() {
                 </button>
                 <button
                   onClick={handleSubmit}
-                  disabled={uploading || selectedPlatforms.length === 0}
+                  disabled={uploading || selectedPlatforms.length === 0 || (selectedPlatforms.includes('facebook') && !selectedFacebookPageId)}
                   className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
                 >
                   {uploading ? 'Uploading...' : 'Upload & Schedule'}
